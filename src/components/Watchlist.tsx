@@ -138,7 +138,7 @@ export default function Watchlist({
         {/* Latency Meter */}
         {status === 'connected' && (
           <div className="flex justify-between items-center bg-[#0d1424] border border-[#1b253b] rounded-md px-3 py-1.5 mb-4 text-xs">
-            <span className="text-gray-400">Bybit Linear latency:</span>
+            <span className="text-gray-400">Binance stream latency:</span>
             <span className={`font-mono font-semibold ${latency < 25 ? 'text-emerald-400' : 'text-amber-400'}`}>
               ● {latency} ms
             </span>

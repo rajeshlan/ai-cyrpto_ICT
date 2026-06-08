@@ -350,7 +350,7 @@ export default function App() {
           <span className="flex items-center space-x-1.5 mt-2 sm:mt-0">
             <span>NETWORK CORE:</span>
             <span className="text-emerald-450 text-emerald-400 font-bold bg-[#10b981]/10 px-1.5 py-0.5 rounded">ONLINE</span>
-            <span>DATA BYBIT API COMPREHENSIVES: ACTIVE</span>
+            <span>DATA BINANCE STREAM FEED: ACTIVE</span>
           </span>
         </div>
       </footer>
