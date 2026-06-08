@@ -19,10 +19,12 @@ import SetupValidator from './components/SetupValidator';
 import RiskManager from './components/RiskManager';
 import Journal from './components/Journal';
 import CopilotChat from './components/CopilotChat';
+import BybitAutopilot from './components/BybitAutopilot';
 import { ShieldCheck, Flame, BellRing, BrainCircuit, Play, Square, Settings2 } from 'lucide-react';
 
 export default function App() {
   const [selectedTicker, setSelectedTicker] = useState<AssetTicker>('BTCUSDT');
+  const [isAutopilotArmed, setIsAutopilotArmed] = useState<boolean>(false);
   const [marketStates, setMarketStates] = useState<Record<AssetTicker, MarketState | null>>({
     BTCUSDT: null,
     ETHUSDT: null,
@@ -163,6 +165,69 @@ export default function App() {
     setJournalEntries((prev) => [newOpenPosition, ...prev]);
   };
 
+  // Dispatch Trade Autopilot Action
+  const handleExecuteAutoTrade = useCallback(async (setup: any) => {
+    try {
+      const res = await fetch('/api/bybit/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: setup.ticker,
+          direction: setup.direction,
+          price: (setup.entryZone.start + setup.entryZone.end) / 2,
+          stopLoss: setup.stopLoss,
+          takeProfit: setup.tp1,
+          score: setup.confidenceScore
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          // Successfully placed trade (either simulated or real). Update our live position list!
+          const newPos: TradeJournalEntry = {
+            id: data.orderId || `trade-${Date.now()}`,
+            ticker: setup.ticker,
+            direction: setup.direction,
+            entryPrice: (setup.entryZone.start + setup.entryZone.end) / 2,
+            exitPrice: 0,
+            quantity: data.quantity,
+            pnl: 0,
+            pnlPercent: 0,
+            riskAmount: data.riskSpent,
+            setupType: `BYBIT AUTO: ${setup.grade} GRADE`,
+            status: 'OPEN',
+            openTime: data.timestamp || new Date().toLocaleTimeString(),
+            closeTime: '',
+            notes: `Auto order ${data.orderId}. Hash: ${data.txnHash}. Margin: $${data.finalMargin.toFixed(2)}. Connection: ${data.executionMode}`
+          };
+
+          setJournalEntries((prev) => [newPos, ...prev]);
+
+          // Trigger alerting
+          const isReal = data.executionMode === "REAL_BYBIT";
+          const botAlert: Alert = {
+            id: `alert-auto-${Date.now()}`,
+            ticker: setup.ticker,
+            type: 'TRADE_COMPLETED',
+            message: isReal 
+              ? `🛡️ [BYBIT LIVE] Auto-order confirmed! Margin: $${data.finalMargin.toFixed(2)}. Active position created.`
+              : `🚀 [SANDBOX] Auto position of ${data.quantity} filled on simulated liquidity pool!`,
+            timestamp: new Date().toLocaleTimeString(),
+            severity: isReal ? 'high' : 'medium'
+          };
+          setActiveAlerts((prev) => [botAlert, ...prev.slice(0, 4)]);
+          
+          setTimeout(() => {
+            setActiveAlerts((prev) => prev.filter((a) => a.id !== botAlert.id));
+          }, 5500);
+        }
+      }
+    } catch (err) {
+      console.error("Auto trigger dispatch error:", err);
+    }
+  }, []);
+
   // Dispatch Close Position Action Click
   const handleClosePosition = (id: string, exitPrice: number) => {
     setJournalEntries((prev) => 
@@ -279,11 +344,21 @@ export default function App() {
         
         {/* Left column: Watchlist - Span 3 */}
         <section className="lg:col-span-3 flex flex-col space-y-4">
-          <div className="h-full">
+          <div className="flex-1">
             <Watchlist 
               selectedTicker={selectedTicker}
               onSelectTicker={setSelectedTicker}
               onMarketStateUpdate={handleMarketStateUpdate}
+            />
+          </div>
+          <div className="shrink-0">
+            <BybitAutopilot 
+              isArmed={isAutopilotArmed}
+              onToggleArmed={setIsAutopilotArmed}
+              openPositionCount={stats.openCount}
+              selectedTicker={selectedTicker}
+              onExecuteAutoTrade={handleExecuteAutoTrade}
+              currentRecommendation={currentRecommendation}
             />
           </div>
         </section>

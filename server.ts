@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import crypto from "crypto";
 
 dotenv.config();
 
@@ -17,6 +18,292 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Bybit autopilot trading logs storage
+interface BotLog {
+  id: string;
+  timestamp: string;
+  type: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
+  message: string;
+}
+
+let botLogs: BotLog[] = [
+  {
+    id: 'log-init',
+    timestamp: new Date().toLocaleTimeString(),
+    type: 'INFO',
+    message: 'Institutional Trading Engine initialized. Ready to execute.'
+  }
+];
+
+function addBotLog(type: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR', message: string) {
+  const newLog: BotLog = {
+    id: `blog-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    timestamp: new Date().toLocaleTimeString(),
+    type,
+    message
+  };
+  botLogs.push(newLog);
+  if (botLogs.length > 50) botLogs.shift();
+}
+
+// REST Api endpoint block for Bybit configuration
+app.get("/api/bybit/config", (req, res) => {
+  const apiKey = process.env.BYBIT_API_KEY || "";
+  const apiSecret = process.env.BYBIT_API_SECRET || "";
+  
+  res.json({
+    bybit_api_key: apiKey ? `${apiKey.substring(0, 4)}...${apiKey.substring(apiKey.length - 4)}` : "",
+    bybit_api_secret_set: !!apiSecret,
+    leverage: parseInt(process.env.LEVERAGE || "10", 10),
+    risk_per_trade_percent: parseFloat(process.env.RISK_PER_TRADE || "1"),
+    max_open_trades: parseInt(process.env.MAX_OPEN_TRADES || "1", 10),
+    max_risk_per_trade: parseFloat(process.env.MAX_RISK_PER_TRADE || "2.0"),
+    min_signal_score: parseInt(process.env.MIN_SIGNAL_SCORE || "60", 10),
+    max_margin_per_trade: parseFloat(process.env.MAX_MARGIN_PER_TRADE || "1.0"),
+    max_notional_per_trade: parseFloat(process.env.MAX_NOTIONAL_PER_TRADE || "20.0"),
+    is_configured: !!(apiKey && apiSecret)
+  });
+});
+
+app.get("/api/bybit/logs", (req, res) => {
+  res.json(botLogs);
+});
+
+app.post("/api/bybit/clear-logs", (req, res) => {
+  botLogs = [
+    {
+      id: `blog-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString(),
+      type: 'INFO',
+      message: 'Bybit autopilot log feed cleared.'
+    }
+  ];
+  res.json({ status: "success" });
+});
+
+// REST Api endpoint block for Trade Execution
+app.post("/api/bybit/execute", async (req, res) => {
+  try {
+    const { ticker, direction, price, stopLoss, takeProfit, score } = req.body;
+    
+    if (!ticker || !direction || !price || !stopLoss) {
+      res.status(400).json({ error: "Missing required trading execution parameters" });
+      return;
+    }
+
+    const leverage = parseInt(process.env.LEVERAGE || "10", 10);
+    const riskPercentInput = parseFloat(process.env.RISK_PER_TRADE || "1");
+    const maxRiskPercent = parseFloat(process.env.MAX_RISK_PER_TRADE || "2.0");
+    const riskPercent = Math.min(riskPercentInput, maxRiskPercent);
+
+    const minSignalScore = parseInt(process.env.MIN_SIGNAL_SCORE || "60", 10);
+    const maxMargin = parseFloat(process.env.MAX_MARGIN_PER_TRADE || "1.0");
+    const maxNotional = parseFloat(process.env.MAX_NOTIONAL_PER_TRADE || "20.0");
+
+    if (score < minSignalScore) {
+      addBotLog("WARNING", `Execution rejected: Signal Score ${score} is below config minimum filter ${minSignalScore}`);
+      res.json({ success: false, reason: "Signal score below threshold" });
+      return;
+    }
+
+    addBotLog("INFO", `Evaluating setup: ${ticker} (${direction}) at $${price.toLocaleString()} with stop loss $${stopLoss.toLocaleString()}`);
+
+    let accountBalance = 10000; // default simulation balance
+    let realExecutionSuccess = false;
+    let orderId = `sim-ord-${Date.now()}`;
+    let txnHash = `sim-tx-${Math.random().toString(36).substring(2, 10)}`;
+
+    const apiKey = process.env.BYBIT_API_KEY || "";
+    const apiSecret = process.env.BYBIT_API_SECRET || "";
+    const hasKeys = !!(apiKey && apiSecret);
+
+    if (hasKeys) {
+      addBotLog("INFO", "Bybit credentials present. Retrieving total asset wallet balance...");
+      try {
+        const timestamp = Date.now().toString();
+        const recvWindow = "5000";
+        const queryParams = "accountType=UNIFIED";
+        const signature = crypto
+          .createHmac("sha256", apiSecret)
+          .update(timestamp + apiKey + recvWindow + queryParams)
+          .digest("hex");
+
+        const balanceResponse = await fetch(`https://api.bybit.com/v5/account/wallet-balance?${queryParams}`, {
+          method: "GET",
+          headers: {
+            "X-BAPI-API-KEY": apiKey,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recvWindow,
+            "Content-Type": "application/json"
+          }
+        });
+
+        if (balanceResponse.ok) {
+          const balData: any = await balanceResponse.json();
+          if (balData.retCode === 0 && balData.result?.list?.[0]?.totalWalletBalance) {
+            accountBalance = parseFloat(balData.result.list[0].totalWalletBalance);
+            addBotLog("SUCCESS", `Connected! Real USDT Wallet balance retrieved: $${accountBalance.toLocaleString()}`);
+          } else {
+            addBotLog("WARNING", `Bybit balance query failed: ${balData.retMsg || "Code " + balData.retCode}. Falling back to demo portfolio.`);
+          }
+        } else {
+          addBotLog("WARNING", `Bybit REST endpoint unreachable (HTTP ${balanceResponse.status}). Using sandbox balance.`);
+        }
+      } catch (err: any) {
+        addBotLog("WARNING", `Failed fetching Bybit wallet metrics: ${err.message}. Sandbox balance assigned.`);
+      }
+    } else {
+      addBotLog("INFO", "Simulator active. Demonstration account balance: $10,000 USDT.");
+    }
+
+    // POSITION SIZING MATRIX
+    // Risk amount in fiat USD
+    const riskUsd = accountBalance * (riskPercent / 100);
+    // Grid distance percent to invalidity point
+    const slDistancePct = Math.abs(price - stopLoss) / price;
+
+    // Base risk matching notional size
+    let targetNotional = riskUsd / (slDistancePct || 0.005);
+    addBotLog("INFO", `Risk Formula: Allocated Drawdown $${riskUsd.toFixed(2)} (${riskPercent}%), SL SL-Distance ${(slDistancePct * 100).toFixed(2)}%`);
+
+    // Margin constraints (notional / leverage must <= maxMargin)
+    const initialMarginRequired = targetNotional / leverage;
+    if (initialMarginRequired > maxMargin) {
+      const clampedNotional = maxMargin * leverage;
+      addBotLog("WARNING", `Margin boundary hit: Projected margin $${initialMarginRequired.toFixed(2)} > allowed limit $${maxMargin.toFixed(2)}. Downgraded position notional from $${targetNotional.toFixed(2)} to $${clampedNotional.toFixed(2)}.`);
+      targetNotional = clampedNotional;
+    }
+
+    // Notional constraints
+    if (targetNotional > maxNotional) {
+      addBotLog("WARNING", `Notional ceiling hit: Projected notional $${targetNotional.toFixed(2)} > allowed limit $${maxNotional.toFixed(2)}. Clamping size.`);
+      targetNotional = maxNotional;
+    }
+
+    // Quantity calculations matching contract specifications
+    let quantity = targetNotional / price;
+    if (ticker === "BTCUSDT") {
+      quantity = Math.round(quantity * 1000) / 1000;
+    } else if (ticker === "ETHUSDT") {
+      quantity = Math.round(quantity * 100) / 100;
+    } else {
+      quantity = Math.round(quantity * 10) / 10;
+    }
+
+    if (quantity <= 0) {
+      addBotLog("ERROR", "Contracts scale calculated to 0 units under constraints. Trade rejected.");
+      res.json({ success: false, reason: "Quantity calculated to 0 under constraints" });
+      return;
+    }
+
+    const calculatedNotional = quantity * price;
+    const finalMarginRequired = calculatedNotional / leverage;
+
+    addBotLog("INFO", `Target size locked: ${quantity} units ($${calculatedNotional.toFixed(2)} Notional) using $${finalMarginRequired.toFixed(2)} Margin at ${leverage}x leverage`);
+
+    // BYBIT SERVICE INTEGRATION CALLS
+    if (hasKeys) {
+      addBotLog("INFO", `Transmitting order payload to real Bybit Linear Desk... Symbol: ${ticker} Side: ${direction}`);
+      try {
+        // Set leverage API call first
+        const setLevTimestamp = Date.now().toString();
+        const setLevBody = JSON.stringify({
+          category: "linear",
+          symbol: ticker,
+          buyLeverage: leverage.toString(),
+          sellLeverage: leverage.toString()
+        });
+        const setLevSign = crypto
+          .createHmac("sha256", apiSecret)
+          .update(setLevTimestamp + apiKey + "5000" + setLevBody)
+          .digest("hex");
+
+        await fetch("https://api.bybit.com/v5/position/set-leverage", {
+          method: "POST",
+          headers: {
+            "X-BAPI-API-KEY": apiKey,
+            "X-BAPI-SIGN": setLevSign,
+            "X-BAPI-TIMESTAMP": setLevTimestamp,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json"
+          },
+          body: setLevBody
+        });
+
+        // Place order API call
+        const placeTimestamp = Date.now().toString();
+        const placeBody = JSON.stringify({
+          category: "linear",
+          symbol: ticker,
+          side: direction === "LONG" ? "Buy" : "Sell",
+          orderType: "Market",
+          qty: quantity.toString(),
+          positionIdx: 0,
+          timeInForce: "GTC",
+          takeProfit: takeProfit ? (Math.round(takeProfit * 100) / 100).toString() : undefined,
+          stopLoss: stopLoss ? (Math.round(stopLoss * 100) / 100).toString() : undefined
+        });
+        const placeSign = crypto
+          .createHmac("sha256", apiSecret)
+          .update(placeTimestamp + apiKey + "5000" + placeBody)
+          .digest("hex");
+
+        const orderResponse = await fetch("https://api.bybit.com/v5/order/create", {
+          method: "POST",
+          headers: {
+            "X-BAPI-API-KEY": apiKey,
+            "X-BAPI-SIGN": placeSign,
+            "X-BAPI-TIMESTAMP": placeTimestamp,
+            "X-BAPI-RECV-WINDOW": "5000",
+            "Content-Type": "application/json"
+          },
+          body: placeBody
+        });
+
+        const orderData: any = await orderResponse.json();
+        if (orderResponse.ok && orderData.retCode === 0) {
+          realExecutionSuccess = true;
+          orderId = orderData.result?.orderId || orderId;
+          txnHash = `tx-${orderId.substring(0, 10)}`;
+          addBotLog("SUCCESS", `🛡️ [BYBIT LIVE] ORDER EXECUTED! Contracts placed onto matching pool. Order ID: ${orderId}`);
+        } else {
+          addBotLog("ERROR", `Bybit rejected execution parameters: [${orderData.retCode}] ${orderData.retMsg}`);
+        }
+      } catch (err: any) {
+        addBotLog("ERROR", `Transaction failed on client level: ${err.message}`);
+      }
+    }
+
+    if (!realExecutionSuccess && hasKeys) {
+      addBotLog("WARNING", "Live matching pool order rejected. Defaulting to sandbox record tracker.");
+    }
+
+    if (!hasKeys) {
+      addBotLog("SUCCESS", `🚀 [SANDBOX] EXECUTION COMPLETED! Simulated positions initialized in ledger at entry price.`);
+    }
+
+    res.json({
+      success: true,
+      executionMode: hasKeys && realExecutionSuccess ? "REAL_BYBIT" : "SANDBOX_SIMULATOR",
+      orderId,
+      txnHash,
+      quantity,
+      finalMargin: finalMarginRequired,
+      notionalValue: calculatedNotional,
+      leverage,
+      balance: accountBalance,
+      riskSpent: riskUsd,
+      timestamp: new Date().toLocaleTimeString()
+    });
+
+  } catch (err: any) {
+    console.error("Bybit Trade Execution API Error:", err);
+    addBotLog("ERROR", `Bot Executor crash: ${err.message}`);
+    res.status(500).json({ error: err.message || "Failed trade execution protocol." });
+  }
+});
 
 // Initialize Gemini SDK lazily to prevent crash on startup if key is missing
 let aiClient: GoogleGenAI | null = null;
