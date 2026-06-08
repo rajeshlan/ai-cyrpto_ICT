@@ -1,0 +1,6 @@
+{
+  "name": "TradeBrain ICT",
+  "description": "Professional-grade ICT Trading Assistant & Decision Support Cockpit for manual traders.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
